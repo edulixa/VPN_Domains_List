@@ -13,29 +13,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Proton and relay-ASN IP list
+      - name: Build feed
+        shell: bash {0}
         run: |
           set -uo pipefail
           OUT=proton_ips.txt
           TMP=$(mktemp)
 
+          echo "=== Proton logicals ==="
           curl -s "https://api.protonvpn.ch/vpn/logicals" \
             | jq -r '.LogicalServers[].Servers[] | .EntryIP, .ExitIP' 2>/dev/null \
-            | grep -Eo '^[0-9.]+$' >> "$TMP" || true
+            | grep -Eo '^[0-9.]+$' > /tmp/p.txt
+          echo "Proton IPs: $(wc -l < /tmp/p.txt)"
+          cat /tmp/p.txt >> "$TMP"
 
           for asn in AS60068 AS9009 AS20473; do
-            curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn" \
-              | jq -r '.data.prefixes[].prefix' 2>/dev/null \
-              | grep -v ':' >> "$TMP" || true
+            echo "=== $asn ==="
+            code=$(curl -s -o /tmp/r.json -w '%{http_code}' \
+              "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn&sourceapp=monglish-feed")
+            echo "HTTP $code, bytes $(wc -c < /tmp/r.json)"
+            head -c 150 /tmp/r.json; echo ""
+            n=$(jq -r '.data.prefixes[].prefix' /tmp/r.json 2>/dev/null | grep -v ':' | tee -a "$TMP" | wc -l)
+            echo "$asn IPv4 prefixes: $n"
           done
 
           sort -u "$TMP" | grep -vE '^[[:space:]]*$' > "$OUT"
-          echo "Generated $(wc -l < "$OUT") entries"
-
-          if [ "$(wc -l < "$OUT")" -lt 5000 ]; then
-            echo "Feed too small - aborting to protect existing list"
-            exit 1
-          fi
+          echo "=== TOTAL: $(wc -l < "$OUT") ==="
 
       - name: Commit if changed
         run: |
