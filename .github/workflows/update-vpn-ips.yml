@@ -1,10 +1,8 @@
 name: Update VPN IP feed
-
 on:
   schedule:
     - cron: '0 3 * * 1'
   workflow_dispatch:
-
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -12,11 +10,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install whois
         shell: bash {0}
         run: sudo apt-get update -qq && sudo apt-get install -y -qq whois
-        
+
       - name: Build feed
         shell: bash {0}
         run: |
@@ -29,12 +27,10 @@ jobs:
             | jq -r '.LogicalServers[].Servers[]? | .EntryIP, .ExitIP' 2>/dev/null \
             | grep -Eo '^[0-9.]+$' >> "$TMP" || true
 
-          # Relay hosting ASNs (CDN77, M247, Vultr)
+          # Relay hosting ASNs: CDN77/Datacamp (AS60068 + AS212238), M247, Vultr
           for asn in AS60068 AS212238 AS9009 AS20473; do
-            # RIPEstat announced
             curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn&sourceapp=monglish-feed" \
               | jq -r '.data.prefixes[].prefix' 2>/dev/null | grep -v ':' >> "$TMP" || true
-            # RADB route objects (catches low-visibility prefixes)
             whois -h whois.radb.net -- "-i origin $asn" 2>/dev/null \
               | awk '/^route:/ {print $2}' | grep -v ':' >> "$TMP" || true
           done
