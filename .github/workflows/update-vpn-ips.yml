@@ -1,0 +1,41 @@
+name: Update VPN IP feed
+on:
+  schedule:
+    - cron: '0 3 * * 1'      # weekly Monday 03:00 UTC
+  workflow_dispatch:          # manual "Run workflow" button
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Proton + relay-ASN IP list
+        run: |
+          set -e
+          OUT=proton_ips.txt          # <-- change to YOUR actual IP filename
+          TMP=$(mktemp)
+
+          # (a) Proton published server IPs (entry + exit)
+          curl -s "https://api.protonvpn.ch/vpn/logicals" \
+            | jq -r '.LogicalServers[].Servers[] | .EntryIP, .ExitIP' \
+            | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' >> "$TMP" || true
+
+          # (b) Relay-hosting ASN prefixes (CDN77 etc.)
+          for asn in AS60068 AS9009 AS20473; do
+            curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn" \
+              | jq -r '.data.prefixes[].prefix' | grep -v ':' >> "$TMP" || true
+          done
+
+          # dedupe, drop blanks, sort
+          grep -vE '^\s*$' "$TMP" | sort -u > "$OUT"
+          echo "Generated $(wc -l < "$OUT") entries"
+
+      - name: Commit if changed
+        run: |
+          git config user.name "feed-bot"
+          git config user.email "actions@github.com"
+          git add proton_ips.txt        # <-- YOUR IP filename only, NOT the domain file
+          git diff --staged --quiet || git commit -m "auto-update Proton/relay IPs $(date -u +%F)"
+          git push
