@@ -1,26 +1,46 @@
+name: Update VPN IP feed
 
-- name: Build Proton + relay-ASN IP list
-       run: |
-          set -uo pipefail        # drop -e, keep -u -o pipefail
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Proton and relay-ASN IP list
+        run: |
+          set -uo pipefail
           OUT=proton_ips.txt
           TMP=$(mktemp)
 
-          # (a) Proton logicals
           curl -s "https://api.protonvpn.ch/vpn/logicals" \
             | jq -r '.LogicalServers[].Servers[] | .EntryIP, .ExitIP' 2>/dev/null \
             | grep -Eo '^[0-9.]+$' >> "$TMP" || true
 
-          # (b) relay ASN prefixes
           for asn in AS60068 AS9009 AS20473; do
             curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn" \
               | jq -r '.data.prefixes[].prefix' 2>/dev/null \
               | grep -v ':' >> "$TMP" || true
           done
 
-          sort -u "$TMP" | grep -vE '^\s*$' > "$OUT"
+          sort -u "$TMP" | grep -vE '^[[:space:]]*$' > "$OUT"
           echo "Generated $(wc -l < "$OUT") entries"
 
-          # guard: don't commit a shrunken/broken feed
           if [ "$(wc -l < "$OUT")" -lt 5000 ]; then
-            echo "Feed too small — aborting to protect existing list"; exit 1
+            echo "Feed too small - aborting to protect existing list"
+            exit 1
           fi
+
+      - name: Commit if changed
+        run: |
+          git config user.name "feed-bot"
+          git config user.email "actions@github.com"
+          git add proton_ips.txt
+          git diff --staged --quiet || git commit -m "auto-update Proton/relay IPs $(date -u +%F)"
+          git push
