@@ -1,8 +1,10 @@
-name: Update VPN IP feed
+name: Update VPN feeds
+
 on:
   schedule:
     - cron: '0 3 * * 1'
   workflow_dispatch:
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -11,41 +13,97 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install whois
+      - name: Install tools
         shell: bash {0}
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq whois
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq whois bgpq4
 
-      - name: Build feed
+      - name: Build IP feed (proton_ips.txt)
         shell: bash {0}
         run: |
           set -uo pipefail
           OUT=proton_ips.txt
           TMP=$(mktemp)
 
-          # Proton logicals (best-effort)
-          curl -s "https://api.protonvpn.ch/vpn/logicals" \
-            | jq -r '.LogicalServers[].Servers[]? | .EntryIP, .ExitIP' 2>/dev/null \
-            | grep -Eo '^[0-9.]+$' >> "$TMP" || true
+          # VPN / relay hosting ASNs:
+          #   AS60068  Datacamp / CDN77 (main)
+          #   AS212238 Datacamp / CDN77 (secondary - the Japan relays)
+          #   AS136787 TEFINCOM / NordVPN-associated
+          #   AS9009   M247
+          #   AS20473  Vultr / Choopa
+          ASNS="AS60068 AS212238 AS136787 AS9009 AS20473"
 
-          # Relay hosting ASNs: CDN77/Datacamp (AS60068 + AS212238), M247, Vultr
-          for asn in AS60068 AS212238 AS9009 AS20473; do
+          for asn in $ASNS; do
+            # Source 1: RIPEstat announced-prefixes
             curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn&sourceapp=monglish-feed" \
               | jq -r '.data.prefixes[].prefix' 2>/dev/null | grep -v ':' >> "$TMP" || true
+            # Source 2: bgpq4 via IRR (catches low-visibility routes RIPEstat misses)
+            bgpq4 -4 -A -l x "$asn" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' >> "$TMP" || true
+            # Source 3: RADB whois route objects
             whois -h whois.radb.net -- "-i origin $asn" 2>/dev/null \
               | awk '/^route:/ {print $2}' | grep -v ':' >> "$TMP" || true
           done
 
           sort -u "$TMP" | grep -vE '^[[:space:]]*$' > "$OUT"
-          echo "TOTAL: $(wc -l < "$OUT") entries"
+          echo "IP feed: $(wc -l < "$OUT") entries"
 
           if [ "$(wc -l < "$OUT")" -lt 5000 ]; then
-            echo "Too small — aborting"; exit 1
+            echo "IP feed too small - aborting to protect existing list"; exit 1
           fi
 
+      - name: Build domain feed (vpn_domains.txt)
+        shell: bash {0}
+        run: |
+          set -uo pipefail
+          OUT=vpn_domains.txt
+
+          # VPN control-plane / bootstrap domains.
+          # Proton shares infra with these providers - block the cluster so
+          # switching apps does not defeat the block.
+          cat > "$OUT" <<'EOF'
+          protonvpn.com
+          protonvpn.net
+          protonvpn.ch
+          api.protonvpn.ch
+          vpn-api.proton.me
+          protonstatus.com
+          account.protonvpn.com
+          nordvpn.com
+          api.nordvpn.com
+          expressvpn.com
+          express-vpn.com
+          surfshark.com
+          api.surfshark.com
+          mullvad.net
+          api.mullvad.net
+          windscribe.com
+          assets.windscribe.com
+          hotspotshield.com
+          pia.com
+          privateinternetaccess.com
+          cyberghostvpn.com
+          ipvanish.com
+          tunnelbear.com
+          vyprvpn.com
+          hide.me
+          setupvpn.com
+          l4bor.com
+          amounts.cc
+          except.digital
+          thehoney.net
+          hola.org
+          EOF
+
+          # normalize: strip leading whitespace from the heredoc indentation,
+          # drop blanks, dedupe
+          sed 's/^[[:space:]]*//' "$OUT" | grep -vE '^[[:space:]]*$' | sort -u > "${OUT}.tmp"
+          mv "${OUT}.tmp" "$OUT"
+          echo "Domain feed: $(wc -l < "$OUT") entries"
+
       - name: Commit if changed
+        shell: bash {0}
         run: |
           git config user.name "feed-bot"
           git config user.email "actions@github.com"
-          git add proton_ips.txt
-          git diff --staged --quiet || git commit -m "auto-update Proton/relay IPs $(date -u +%F)"
+          git add proton_ips.txt vpn_domains.txt
+          git diff --staged --quiet || git commit -m "auto-update VPN feeds $(date -u +%F)"
           git push
