@@ -15,95 +15,46 @@ jobs:
 
       - name: Install tools
         shell: bash {0}
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq whois bgpq4
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq whois bgpq4 jq python3-pip
+          pip install --quiet --break-system-packages netaddr
 
-      - name: Build IP feed (proton_ips.txt)
+      - name: Build IP feed
         shell: bash {0}
         run: |
           set -uo pipefail
-          OUT=proton_ips.txt
-          TMP=$(mktemp)
 
-          # VPN / relay hosting ASNs:
-          #   AS60068  Datacamp / CDN77 (main)
-          #   AS212238 Datacamp / CDN77 (secondary - the Japan relays)
-          #   AS136787 TEFINCOM / NordVPN-associated
-          #   AS9009   M247
-          #   AS20473  Vultr / Choopa
-          ASNS="AS60068 AS212238 AS136787 AS9009 AS20473"
-
-          for asn in $ASNS; do
-            # Source 1: RIPEstat announced-prefixes
+          # Relay ASNs to BLOCK (Datacamp/CDN77 - the relays Proton actually used)
+          : > /tmp/block_raw.txt
+          for asn in AS60068 AS212238; do
             curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn&sourceapp=monglish-feed" \
-              | jq -r '.data.prefixes[].prefix' 2>/dev/null | grep -v ':' >> "$TMP" || true
-            # Source 2: bgpq4 via IRR (catches low-visibility routes RIPEstat misses)
-            bgpq4 -4 -A -l x "$asn" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' >> "$TMP" || true
-            # Source 3: RADB whois route objects
-            whois -h whois.radb.net -- "-i origin $asn" 2>/dev/null \
-              | awk '/^route:/ {print $2}' | grep -v ':' >> "$TMP" || true
+              | jq -r '.data.prefixes[].prefix' 2>/dev/null | grep -v ':' >> /tmp/block_raw.txt || true
+            bgpq4 -4 -A -l x "$asn" 2>/dev/null | grep -oE '[0-9.]+/[0-9]+' >> /tmp/block_raw.txt || true
           done
 
-          sort -u "$TMP" | grep -vE '^[[:space:]]*$' > "$OUT"
-          echo "IP feed: $(wc -l < "$OUT") entries"
+          # Legit CDNs to WHITELIST (exclude from block feed)
+          # AS200325 = BunnyCDN
+          : > /tmp/allow.txt
+          for asn in AS200325; do
+            curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=$asn&sourceapp=monglish-feed" \
+              | jq -r '.data.prefixes[].prefix' 2>/dev/null | grep -v ':' >> /tmp/allow.txt || true
+          done
 
-          if [ "$(wc -l < "$OUT")" -lt 5000 ]; then
-            echo "IP feed too small - aborting to protect existing list"; exit 1
+          # CIDR-aware subtraction
+          python3 subtract.py
+
+          echo "IP feed: $(wc -l < proton_ips.txt) entries"
+          if [ "$(wc -l < proton_ips.txt)" -lt 3000 ]; then
+            echo "Feed too small - aborting"
+            exit 1
           fi
-
-      - name: Build domain feed (vpn_domains.txt)
-        shell: bash {0}
-        run: |
-          set -uo pipefail
-          OUT=vpn_domains.txt
-
-          # VPN control-plane / bootstrap domains.
-          # Proton shares infra with these providers - block the cluster so
-          # switching apps does not defeat the block.
-          cat > "$OUT" <<'EOF'
-          protonvpn.com
-          protonvpn.net
-          protonvpn.ch
-          api.protonvpn.ch
-          vpn-api.proton.me
-          protonstatus.com
-          account.protonvpn.com
-          nordvpn.com
-          api.nordvpn.com
-          expressvpn.com
-          express-vpn.com
-          surfshark.com
-          api.surfshark.com
-          mullvad.net
-          api.mullvad.net
-          windscribe.com
-          assets.windscribe.com
-          hotspotshield.com
-          pia.com
-          privateinternetaccess.com
-          cyberghostvpn.com
-          ipvanish.com
-          tunnelbear.com
-          vyprvpn.com
-          hide.me
-          setupvpn.com
-          l4bor.com
-          amounts.cc
-          except.digital
-          thehoney.net
-          hola.org
-          EOF
-
-          # normalize: strip leading whitespace from the heredoc indentation,
-          # drop blanks, dedupe
-          sed 's/^[[:space:]]*//' "$OUT" | grep -vE '^[[:space:]]*$' | sort -u > "${OUT}.tmp"
-          mv "${OUT}.tmp" "$OUT"
-          echo "Domain feed: $(wc -l < "$OUT") entries"
 
       - name: Commit if changed
         shell: bash {0}
         run: |
           git config user.name "feed-bot"
           git config user.email "actions@github.com"
-          git add proton_ips.txt vpn_domains.txt
-          git diff --staged --quiet || git commit -m "auto-update VPN feeds $(date -u +%F)"
+          git add proton_ips.txt
+          git diff --staged --quiet || git commit -m "auto-update VPN IPs $(date -u +%F)"
           git push
